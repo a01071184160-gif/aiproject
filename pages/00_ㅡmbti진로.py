@@ -1,4 +1,4 @@
-import streamlit as st
+// import streamlit as st
 
 st.set_page_config(page_title="MBTI 진로 탐험대", page_icon="🚀", layout="centered")
 
