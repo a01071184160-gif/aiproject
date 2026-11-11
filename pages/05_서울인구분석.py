@@ -1,30 +1,36 @@
 
 from pathlib import Path
+import re
 import pandas as pd
+import streamlit as st
 import matplotlib.pyplot as plt
 from matplotlib import font_manager, ticker
-import streamlit as st
 
 st.set_page_config(
-    page_title="서울 연령별 인구 분석",
+    page_title="서울 연령별 인구",
     page_icon="📈",
     layout="wide"
 )
 
-# CSV는 pages 폴더의 상위 폴더에 위치
+# pages 폴더의 상위 폴더에서 CSV 읽기
 CSV_PATH = (
     Path(__file__).resolve().parent.parent
     / "population.csv"
 )
 
+AGES = [
+    f"{n}~{n+9}세"
+    for n in range(0, 100, 10)
+] + ["100세 이상"]
 
-@st.cache_data
-def load_data(path, file_mtime):
-    for encoding in ("utf-8-sig", "cp949", "euc-kr"):
+
+@st.cache_data(show_spinner=False)
+def read_population(path, mtime):
+    for enc in ("utf-8-sig", "cp949", "euc-kr"):
         try:
-            df = pd.read_csv(
+            data = pd.read_csv(
                 path,
-                encoding=encoding,
+                encoding=enc,
                 dtype=str
             )
             break
@@ -33,18 +39,20 @@ def load_data(path, file_mtime):
     else:
         raise ValueError("CSV 인코딩을 읽을 수 없습니다.")
 
-    df.columns = [
+    data.columns = [
         str(c).replace("\ufeff", "").strip()
-        for c in df.columns
+        for c in data.columns
     ]
 
-    if "행정구역" not in df.columns:
-        raise ValueError("행정구역 열이 없습니다.")
+    if "행정구역" not in data.columns:
+        raise ValueError(
+            "행정구역 열이 없습니다. "
+            "population.csv 파일을 확인하세요."
+        )
 
-    df["행정구역"] = (
-        df["행정구역"]
+    data["행정구역"] = (
+        data["행정구역"]
         .fillna("")
-        .astype(str)
         .str.replace(
             r"\s*\(\d+\)\s*$",
             "",
@@ -53,10 +61,10 @@ def load_data(path, file_mtime):
         .str.strip()
     )
 
-    return df
+    return data
 
 
-def set_font():
+def korean_font():
     paths = [
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
         "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
@@ -67,6 +75,7 @@ def set_font():
     for path in paths:
         if Path(path).is_file():
             font_manager.fontManager.addfont(path)
+
             plt.rcParams["font.family"] = (
                 font_manager.FontProperties(
                     fname=path
@@ -82,81 +91,42 @@ st.caption("행정구역, 연도, 성별을 선택하세요.")
 
 if not CSV_PATH.is_file():
     st.error(
-        "population.csv 파일이 없습니다. "
+        "population.csv 파일을 찾을 수 없습니다. "
         "pages 폴더의 상위 폴더에 넣어주세요."
     )
     st.stop()
 
 try:
-    df = load_data(
+    df = read_population(
         str(CSV_PATH),
         CSV_PATH.stat().st_mtime_ns
     )
-except Exception as e:
-    st.error(f"CSV 읽기 오류: {e}")
+except Exception as exc:
+    st.error(f"CSV 읽기 실패: {exc}")
     st.stop()
 
 
-# 연령 구간
-ages = [
-    f"{a}~{a+9}세"
-    for a in range(0, 100, 10)
-] + ["100세 이상"]
-
-
-# 실제 CSV 열 이름에서 데이터 자동 인식
-column_map = {}
-
-for column in df.columns:
-    parts = column.split("_")
-
-    if len(parts) not in (3, 4):
-        continue
-
-    year_text = parts[0].strip()
-
-    if not (
-        year_text.endswith("년")
-        and year_text[:-1].isdigit()
-    ):
-        continue
-
-    year = int(year_text[:-1])
-
-    if len(parts) == 3 and parts[1] == "거주자":
-        sex = "전체"
-        age = parts[2].strip()
-
-    elif (
-        len(parts) == 4
-        and parts[2] == "거주자"
-        and parts[1] in ("남", "여")
-    ):
-        sex = "남성" if parts[1] == "남" else "여성"
-        age = parts[3].strip()
-
-    else:
-        continue
-
-    if age in ages:
-        column_map[(year, sex, age)] = column
-
-
-# 연도와 행정구역
+# 실제 CSV의 열 이름에서 연도 추출
 years = sorted({
-    key[0] for key in column_map
+    int(match.group(1))
+    for col in df.columns
+    if (match := re.match(
+        r"^(\d{4})년_거주자_0~9세$",
+        col
+    ))
 })
 
-areas = [
-    area
-    for area in df["행정구역"].unique().tolist()
-    if area
-]
+areas = (
+    df["행정구역"]
+    .loc[df["행정구역"].ne("")]
+    .drop_duplicates()
+    .tolist()
+)
 
 if not years or not areas:
     st.error(
-        "데이터를 분석할 수 없습니다. "
-        "population.csv 파일을 확인하세요."
+        "연도 또는 행정구역을 찾지 못했습니다. "
+        "GitHub의 CSV 파일을 확인하세요."
     )
     st.stop()
 
@@ -165,10 +135,7 @@ if not years or not areas:
 c1, c2, c3 = st.columns(3)
 
 with c1:
-    area = st.selectbox(
-        "🏙️ 행정구역",
-        areas
-    )
+    area = st.selectbox("🏙️ 행정구역", areas)
 
 with c2:
     year = st.selectbox(
@@ -178,60 +145,71 @@ with c2:
     )
 
 with c3:
-    sex = st.selectbox(
+    gender = st.selectbox(
         "👥 성별",
         ["전체", "남성", "여성"]
     )
 
 
-# 선택한 행정구역
+# 성별에 맞는 열 이름
+prefix = f"{year}년_" + {
+    "전체": "거주자_",
+    "남성": "남_거주자_",
+    "여성": "여_거주자_"
+}[gender]
+
+needed = [
+    prefix + age
+    for age in AGES
+]
+
+missing = [
+    col for col in needed
+    if col not in df.columns
+]
+
+if missing:
+    st.error(
+        "필요한 연령별 데이터가 없습니다: "
+        + ", ".join(missing)
+    )
+    st.stop()
+
+
+# 행정구역 데이터 선택
 selected = df.loc[
-    df["행정구역"] == area
+    df["행정구역"].eq(area)
 ]
 
 if selected.empty:
-    st.error("행정구역 데이터를 찾을 수 없습니다.")
+    st.error("행정구역을 찾지 못했습니다.")
     st.stop()
 
 row = selected.iloc[0]
 
-records = []
+values = pd.to_numeric(
+    row[needed]
+    .astype(str)
+    .str.replace(",", "", regex=False)
+    .str.strip(),
+    errors="coerce"
+)
 
-for age in ages:
-    column = column_map.get((year, sex, age))
+if values.isna().any():
+    st.error("인구수에 비어 있거나 잘못된 값이 있습니다.")
+    st.stop()
 
-    if column is None:
-        st.error(
-            f"{year}년 {sex} {age} "
-            "데이터 열이 없습니다."
-        )
-        st.stop()
-
-    value = pd.to_numeric(
-        str(row[column])
-        .replace(",", "")
-        .strip(),
-        errors="coerce"
-    )
-
-    if pd.isna(value):
-        st.error(f"{age} 인구수가 숫자가 아닙니다.")
-        st.stop()
-
-    records.append({
-        "연령": age,
-        "인구수": int(value)
-    })
-
-
-result = pd.DataFrame(records)
+result = pd.DataFrame({
+    "연령": AGES,
+    "인구수": values.astype(int).to_numpy()
+})
 
 peak = result.loc[
     result["인구수"].idxmax()
 ]
 
 
-# 인구 요약
+# 요약 정보
 m1, m2 = st.columns(2)
 
 m1.metric(
@@ -240,13 +218,13 @@ m1.metric(
 )
 
 m2.metric(
-    "인구가 가장 많은 연령대",
+    "가장 인구가 많은 연령대",
     f"{peak['연령']} ({peak['인구수']:,}명)"
 )
 
 
 # 그래프
-set_font()
+korean_font()
 
 fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -260,35 +238,63 @@ ax.plot(
 )
 
 ax.set_title(
-    f"{area} {year}년 {sex} 연령별 인구"
+    f"{area} {year}년 {gender} 연령별 인구"
 )
 
 ax.set_xlabel("나이 (연령 구간)")
 ax.set_ylabel("인구수 (명)")
-
-# 세로축 1,000명 간격
 ax.set_ylim(bottom=0)
 
-ax.yaxis.set_major_locator(
-    ticker.MultipleLocator(1000)
-)
+maximum = int(result["인구수"].max())
+
+# 1,000명 간격 구분선
+if maximum <= 40000:
+    ax.yaxis.set_major_locator(
+        ticker.MultipleLocator(1000)
+    )
+
+    ax.grid(
+        axis="y",
+        which="major",
+        color="#cccccc",
+        linewidth=0.6
+    )
+
+else:
+    # 인구수가 많으면 눈금 글자만 간격 조정
+    major_step = max(
+        1000,
+        ((maximum // 12 + 999) // 1000) * 1000
+    )
+
+    ax.yaxis.set_major_locator(
+        ticker.MultipleLocator(major_step)
+    )
+
+    ax.yaxis.set_minor_locator(
+        ticker.MultipleLocator(1000)
+    )
+
+    ax.grid(
+        axis="y",
+        which="major",
+        color="#bbbbbb",
+        linewidth=0.6
+    )
+
+    ax.grid(
+        axis="y",
+        which="minor",
+        color="#e7e7e7",
+        linewidth=0.35
+    )
 
 ax.yaxis.set_major_formatter(
     ticker.StrMethodFormatter("{x:,.0f}")
 )
 
-# 구분선
-ax.grid(
-    axis="y",
-    which="major",
-    color="#cccccc",
-    linewidth=0.6
-)
-
-ax.tick_params(
-    axis="x",
-    rotation=35
-)
+ax.tick_params(axis="x", rotation=35)
+ax.set_axisbelow(True)
 
 fig.tight_layout()
 
@@ -297,7 +303,7 @@ plt.close(fig)
 
 
 # 상세 데이터
-with st.expander("📋 상세 데이터"):
+with st.expander("📋 연령별 인구 표 보기"):
     st.dataframe(
         result,
         hide_index=True,
@@ -309,6 +315,6 @@ with st.expander("📋 상세 데이터"):
         data=result.to_csv(
             index=False
         ).encode("utf-8-sig"),
-        file_name=f"{area}_{year}_{sex}_인구.csv",
+        file_name=f"{area}_{year}_{gender}.csv",
         mime="text/csv"
     )
