@@ -1,3 +1,4 @@
+
 from pathlib import Path
 import re
 import pandas as pd
@@ -5,121 +6,294 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager, ticker
 import streamlit as st
 
-st.set_page_config(page_title='서울 인구 분석', page_icon='📈', layout='wide')
-CSV_PATH = Path(__file__).resolve().parent.parent / 'population.csv'
+st.set_page_config(
+    page_title="서울 연령별 인구 분석",
+    page_icon="📈",
+    layout="wide"
+)
 
-@st.cache_data
-def load_data():
-    if not CSV_PATH.is_file():
-        raise FileNotFoundError(f'파일을 찾지 못했습니다: {CSV_PATH}')
-    for enc in ('utf-8-sig', 'cp949', 'euc-kr'):
+# CSV 파일은 pages 폴더의 상위 폴더에 위치
+CSV_PATH = Path(__file__).resolve().parent.parent / "population.csv"
+
+
+@st.cache_data(show_spinner=False)
+def load_csv(path, modified):
+    for enc in ("utf-8-sig", "cp949", "euc-kr"):
         try:
-            df = pd.read_csv(CSV_PATH, encoding=enc, dtype=str)
-            break
+            df = pd.read_csv(path, encoding=enc, dtype=str)
+            df.columns = (
+                df.columns.astype(str)
+                .str.replace("\ufeff", "", regex=False)
+                .str.strip()
+            )
+
+            if "행정구역" not in df.columns:
+                raise ValueError(
+                    "행정구역 열이 없습니다. 열 이름: "
+                    + ", ".join(df.columns[:8])
+                )
+
+            df["행정구역"] = (
+                df["행정구역"]
+                .fillna("")
+                .str.replace(r"\s*\(\d+\)\s*$", "", regex=True)
+                .str.strip()
+            )
+
+            return df
+
         except UnicodeDecodeError:
             continue
-    else:
-        raise ValueError('CSV 인코딩을 확인할 수 없습니다.')
-    df.columns = [str(c).replace('\ufeff', '').strip() for c in df.columns]
-    if '행정구역' not in df.columns:
-        raise ValueError('행정구역 열이 없습니다. CSV 파일을 확인하세요.')
-    df['행정구역'] = df['행정구역'].str.replace(r'\s*\(\d+\)\s*$', '', regex=True).str.strip()
-    for c in df.columns:
-        if c != '행정구역':
-            df[c] = pd.to_numeric(df[c].str.replace(',', '', regex=False), errors='coerce')
-    return df
 
+    raise ValueError("CSV를 UTF-8 또는 CP949로 읽을 수 없습니다.")
+
+
+# 한글 폰트 설정
 def set_font():
-    paths = ['/usr/share/fonts/truetype/nanum/NanumGothic.ttf',
-             '/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf',
-             'C:/Windows/Fonts/malgun.ttf',
-             '/System/Library/Fonts/AppleSDGothicNeo.ttc']
-    for path in paths:
+    candidates = [
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+        "C:/Windows/Fonts/malgun.ttf",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    ]
+
+    for path in candidates:
         if Path(path).is_file():
             font_manager.fontManager.addfont(path)
-            plt.rcParams['font.family'] = font_manager.FontProperties(fname=path).get_name()
+            plt.rcParams["font.family"] = (
+                font_manager.FontProperties(fname=path).get_name()
+            )
             break
-    plt.rcParams['axes.unicode_minus'] = False
 
-st.title('📈 서울특별시 연령별 인구 분석')
-try:
-    df = load_data()
-except (FileNotFoundError, ValueError, pd.errors.ParserError) as e:
-    st.error(str(e))
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+# 화면 제목
+st.title("📈 서울특별시 연령별 인구 분석")
+st.caption(
+    "행정구역, 연도, 성별을 선택하면 연령대별 인구수를 표시합니다."
+)
+
+# CSV 파일 확인
+if not CSV_PATH.is_file():
+    st.error(
+        "population.csv를 찾을 수 없습니다. "
+        "Python 파일은 pages 폴더, CSV는 상위 폴더에 두세요."
+    )
+    st.code(str(CSV_PATH))
     st.stop()
+
+try:
+    df = load_csv(
+        str(CSV_PATH),
+        CSV_PATH.stat().st_mtime_ns
+    )
+except Exception as e:
+    st.error(f"CSV 읽기 실패: {e}")
+    st.stop()
+
+
+# 연령별 데이터 열 자동 인식
+# 예시: 2025년_남_거주자_0~9세
+pattern = re.compile(
+    r"^(\d{4})년_(?:(남|여)_)?거주자_(\d+~\d+세|100세 이상)$"
+)
+
+column_map = {}
+
+for col in df.columns:
+    m = pattern.fullmatch(col)
+
+    if m:
+        year, sex, age = m.groups()
+
+        gender_name = {
+            "남": "남성",
+            "여": "여성",
+            None: "전체"
+        }[sex]
+
+        column_map[
+            (int(year), gender_name, age)
+        ] = col
+
+
+# 선택 가능한 연도와 행정구역
+years = sorted({k[0] for k in column_map})
+
+areas = [
+    x for x in df["행정구역"].unique().tolist()
+    if x
+]
+
+if not years or not areas:
+    st.error(
+        "연도 또는 행정구역을 확인할 수 없습니다. "
+        "현재 파일의 열 이름을 확인하세요."
+    )
+
+    with st.expander("CSV 진단 정보", expanded=True):
+        st.write("경로:", str(CSV_PATH))
+        st.write("크기:", df.shape)
+        st.write("처음 20개 열:", list(df.columns[:20]))
+
+    st.stop()
+
+
+# 선택 메뉴
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    area = st.selectbox(
+        "🏙️ 행정구역",
+        areas
+    )
+
+with c2:
+    year = st.selectbox(
+        "📅 연도",
+        years,
+        index=len(years) - 1
+    )
+
+with c3:
+    sex = st.selectbox(
+        "👥 성별",
+        ["전체", "남성", "여성"]
+    )
+
+
+# 연령 구간 설정
+age_labels = [
+    f"{a}~{a+9}세"
+    for a in range(0, 100, 10)
+] + ["100세 이상"]
+
+
+# 선택한 행정구역 데이터
+row = df.loc[
+    df["행정구역"].eq(area)
+].iloc[0]
+
+records = []
+
+for age in age_labels:
+    col = column_map.get((year, sex, age))
+
+    if col is None:
+        st.error(
+            f"열을 찾을 수 없습니다: "
+            f"{year}년 / {sex} / {age}"
+        )
+        st.stop()
+
+    value = pd.to_numeric(
+        str(row[col]).replace(",", "").strip(),
+        errors="coerce"
+    )
+
+    if pd.isna(value):
+        st.error(
+            f"인구수 값이 비어 있거나 숫자가 아닙니다: {col}"
+        )
+        st.stop()
+
+    records.append({
+        "연령": age,
+        "인구수": int(value)
+    })
+
+
+# 데이터프레임 생성
+result = pd.DataFrame(records)
+
+peak = result.loc[
+    result["인구수"].idxmax()
+]
+
+
+# 인구 요약
+metric1, metric2 = st.columns(2)
+
+metric1.metric(
+    "연령대 인구 합계",
+    f"{result['인구수'].sum():,}명"
+)
+
+metric2.metric(
+    "인구가 가장 많은 연령대",
+    f"{peak['연령']} ({peak['인구수']:,}명)"
+)
+
+
+# 한글 폰트 적용
 set_font()
 
-# 열 이름에서 연도, 성별, 연령 구간을 자동 추출
-pattern = re.compile(r'^(\d{4})년_(?:(남|여)_)?거주자_(\d+~\d+세|100세 이상)$')
-column_map = {}
-for column in df.columns:
-    match = pattern.fullmatch(column)
-    if match:
-        year, sex, age = match.groups()
-        column_map[(int(year), sex or '전체', age)] = column
 
-years = sorted({key[0] for key in column_map})
-areas = df['행정구역'].dropna().unique().tolist()
-if not years or not areas:
-    st.error('연도 또는 행정구역 정보를 확인할 수 없습니다. population.csv를 확인하세요.')
-    with st.expander('CSV 열 이름 확인'):
-        st.write(df.columns.tolist())
-    st.stop()
-
-c1, c2, c3 = st.columns(3)
-with c1:
-    area = st.selectbox('🏙️ 행정구역', areas)
-with c2:
-    year = st.selectbox('📅 연도', years, index=len(years)-1)
-with c3:
-    gender = st.selectbox('👥 성별', ['전체', '남성', '여성'])
-
-sex = {'전체': '전체', '남성': '남', '여성': '여'}[gender]
-ages = [f'{n}~{n+9}세' for n in range(0, 100, 10)] + ['100세 이상']
-missing = [age for age in ages if (year, sex, age) not in column_map]
-if missing:
-    st.error('선택 조건의 연령별 열을 찾지 못했습니다: ' + ', '.join(missing))
-    with st.expander('문제 확인용 열 이름'):
-        st.write(df.columns.tolist())
-    st.stop()
-
-selected = df.loc[df['행정구역'] == area]
-if selected.empty:
-    st.error('선택한 행정구역이 데이터에 없습니다.')
-    st.stop()
-
-record = selected.iloc[0]
-data = pd.DataFrame({
-    '연령': ages,
-    '인구수': [record[column_map[(year, sex, age)]] for age in ages]
-}).dropna(subset=['인구수'])
-if data.empty:
-    st.error('표시할 인구 데이터가 없습니다.')
-    st.stop()
-
-m1, m2 = st.columns(2)
-m1.metric('선택 조건 인구 합계', f"{int(data['인구수'].sum()):,}명")
-peak = data.loc[data['인구수'].idxmax()]
-m2.metric('인구가 가장 많은 연령대', f"{peak['연령']} ({int(peak['인구수']):,}명)")
+# 검정색 꺾은선 그래프
 fig, ax = plt.subplots(figsize=(12, 6))
-ax.plot(data['연령'], data['인구수'], color='black', marker='o', linewidth=2)
-ax.set_title(f'{area} · {year}년 · {gender} 연령별 인구')
-ax.set_xlabel('나이 (연령 구간)')
-ax.set_ylabel('인구수 (명)')
+
+ax.plot(
+    result["연령"],
+    result["인구수"],
+    color="black",
+    linewidth=2,
+    marker="o",
+    markersize=4
+)
+
+ax.set_title(
+    f"{area} · {year}년 · {sex} 연령별 인구",
+    fontsize=15
+)
+
+ax.set_xlabel("나이 (연령 구간)")
+ax.set_ylabel("인구수 (명)")
+
+# 세로축 1,000명 간격
 ax.set_ylim(bottom=0)
-ax.yaxis.set_major_locator(ticker.MultipleLocator(1000))
-ax.yaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}'))
-ax.grid(axis='y', color='#cccccc', linewidth=0.6)
-ax.set_axisbelow(True)
-ax.tick_params(axis='x', labelrotation=35)
+
+ax.yaxis.set_major_locator(
+    ticker.MultipleLocator(1000)
+)
+
+ax.yaxis.set_major_formatter(
+    ticker.StrMethodFormatter("{x:,.0f}")
+)
+
+# 세로축 기준 가로 구분선
+ax.grid(
+    axis="y",
+    color="#cccccc",
+    linewidth=0.6
+)
+
+ax.tick_params(
+    axis="x",
+    rotation=35
+)
+
 fig.tight_layout()
+
 st.pyplot(fig)
+
 plt.close(fig)
 
-with st.expander('📋 연령별 인구 데이터'):
-    table = data.copy()
-    table['인구수'] = table['인구수'].astype(int)
-    st.dataframe(table, hide_index=True, use_container_width=True)
-    st.download_button('CSV 다운로드', table.to_csv(index=False).encode('utf-8-sig'),
-                       file_name=f'{area}_{year}_{gender}_인구.csv', mime='text/csv')
 
+# 상세 데이터 확인 및 다운로드
+with st.expander("📋 데이터 표 및 다운로드"):
+
+    st.dataframe(
+        result,
+        hide_index=True,
+        use_container_width=True
+    )
+
+    st.download_button(
+        "CSV 다운로드",
+        data=result.to_csv(
+            index=False
+        ).encode("utf-8-sig"),
+        file_name=f"{area}_{year}_{sex}_인구.csv",
+        mime="text/csv"
+    )
