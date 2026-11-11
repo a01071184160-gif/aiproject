@@ -1,13 +1,14 @@
 
 from pathlib import Path
 import re
+
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 from matplotlib import font_manager, ticker
 
 st.set_page_config(
-    page_title="서울 연령별 인구",
+    page_title="서울 연령별 인구 분석",
     page_icon="📈",
     layout="wide"
 )
@@ -19,18 +20,18 @@ CSV_PATH = (
 )
 
 AGES = [
-    f"{n}~{n+9}세"
-    for n in range(0, 100, 10)
+    f"{i}~{i+9}세"
+    for i in range(0, 100, 10)
 ] + ["100세 이상"]
 
 
 @st.cache_data(show_spinner=False)
-def read_population(path, mtime):
-    for enc in ("utf-8-sig", "cp949", "euc-kr"):
+def load_data(path, modified_time):
+    for encoding in ("cp949", "utf-8-sig", "euc-kr"):
         try:
-            data = pd.read_csv(
+            df = pd.read_csv(
                 path,
-                encoding=enc,
+                encoding=encoding,
                 dtype=str
             )
             break
@@ -39,20 +40,18 @@ def read_population(path, mtime):
     else:
         raise ValueError("CSV 인코딩을 읽을 수 없습니다.")
 
-    data.columns = [
+    df.columns = [
         str(c).replace("\ufeff", "").strip()
-        for c in data.columns
+        for c in df.columns
     ]
 
-    if "행정구역" not in data.columns:
-        raise ValueError(
-            "행정구역 열이 없습니다. "
-            "population.csv 파일을 확인하세요."
-        )
+    if "행정구역" not in df.columns:
+        raise ValueError("행정구역 열이 없습니다.")
 
-    data["행정구역"] = (
-        data["행정구역"]
+    df["행정구역"] = (
+        df["행정구역"]
         .fillna("")
+        .astype(str)
         .str.replace(
             r"\s*\(\d+\)\s*$",
             "",
@@ -61,10 +60,10 @@ def read_population(path, mtime):
         .str.strip()
     )
 
-    return data
+    return df
 
 
-def korean_font():
+def set_korean_font():
     paths = [
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
         "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
@@ -75,7 +74,6 @@ def korean_font():
     for path in paths:
         if Path(path).is_file():
             font_manager.fontManager.addfont(path)
-
             plt.rcParams["font.family"] = (
                 font_manager.FontProperties(
                     fname=path
@@ -87,33 +85,34 @@ def korean_font():
 
 
 st.title("📈 서울특별시 연령별 인구 분석")
-st.caption("행정구역, 연도, 성별을 선택하세요.")
+st.write("행정구역, 연도, 성별을 선택하세요.")
 
 if not CSV_PATH.is_file():
     st.error(
-        "population.csv 파일을 찾을 수 없습니다. "
+        "population.csv 파일이 없습니다. "
         "pages 폴더의 상위 폴더에 넣어주세요."
     )
     st.stop()
 
 try:
-    df = read_population(
+    df = load_data(
         str(CSV_PATH),
         CSV_PATH.stat().st_mtime_ns
     )
-except Exception as exc:
-    st.error(f"CSV 읽기 실패: {exc}")
+except Exception as e:
+    st.error(f"CSV 읽기 오류: {e}")
     st.stop()
 
 
-# 실제 CSV의 열 이름에서 연도 추출
+# 실제 CSV의 총인구수 열에서 연도 추출
+pattern = re.compile(
+    r"^(\d{4})년_거주자_총인구수$"
+)
+
 years = sorted({
     int(match.group(1))
     for col in df.columns
-    if (match := re.match(
-        r"^(\d{4})년_거주자_0~9세$",
-        col
-    ))
+    if (match := pattern.fullmatch(col))
 })
 
 areas = (
@@ -125,7 +124,7 @@ areas = (
 
 if not years or not areas:
     st.error(
-        "연도 또는 행정구역을 찾지 못했습니다. "
+        "연도 또는 행정구역을 확인할 수 없습니다. "
         "GitHub의 CSV 파일을 확인하세요."
     )
     st.stop()
@@ -151,17 +150,14 @@ with c3:
     )
 
 
-# 성별에 맞는 열 이름
-prefix = f"{year}년_" + {
-    "전체": "거주자_",
-    "남성": "남_거주자_",
-    "여성": "여_거주자_"
+# 성별에 따른 열 이름
+prefix = {
+    "전체": f"{year}년_거주자_",
+    "남성": f"{year}년_남_거주자_",
+    "여성": f"{year}년_여_거주자_"
 }[gender]
 
-needed = [
-    prefix + age
-    for age in AGES
-]
+needed = [prefix + age for age in AGES]
 
 missing = [
     col for col in needed
@@ -170,19 +166,19 @@ missing = [
 
 if missing:
     st.error(
-        "필요한 연령별 데이터가 없습니다: "
+        "연령별 데이터 열이 없습니다: "
         + ", ".join(missing)
     )
     st.stop()
 
 
-# 행정구역 데이터 선택
+# 선택한 행정구역 데이터
 selected = df.loc[
     df["행정구역"].eq(area)
 ]
 
 if selected.empty:
-    st.error("행정구역을 찾지 못했습니다.")
+    st.error("행정구역 데이터를 찾지 못했습니다.")
     st.stop()
 
 row = selected.iloc[0]
@@ -196,7 +192,7 @@ values = pd.to_numeric(
 )
 
 if values.isna().any():
-    st.error("인구수에 비어 있거나 잘못된 값이 있습니다.")
+    st.error("인구수에 잘못된 값이 있습니다.")
     st.stop()
 
 result = pd.DataFrame({
@@ -204,12 +200,10 @@ result = pd.DataFrame({
     "인구수": values.astype(int).to_numpy()
 })
 
-peak = result.loc[
-    result["인구수"].idxmax()
-]
+peak = result.loc[result["인구수"].idxmax()]
 
 
-# 요약 정보
+# 인구 요약
 m1, m2 = st.columns(2)
 
 m1.metric(
@@ -223,8 +217,8 @@ m2.metric(
 )
 
 
-# 그래프
-korean_font()
+# 검정색 꺾은선 그래프
+set_korean_font()
 
 fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -247,28 +241,26 @@ ax.set_ylim(bottom=0)
 
 maximum = int(result["인구수"].max())
 
-# 1,000명 간격 구분선
+# 1,000명 간격 가로 구분선
 if maximum <= 40000:
     ax.yaxis.set_major_locator(
         ticker.MultipleLocator(1000)
     )
-
     ax.grid(
         axis="y",
         which="major",
         color="#cccccc",
         linewidth=0.6
     )
-
 else:
-    # 인구수가 많으면 눈금 글자만 간격 조정
-    major_step = max(
+    # 인구가 많은 경우 숫자 눈금 간격 조정
+    step = max(
         1000,
         ((maximum // 12 + 999) // 1000) * 1000
     )
 
     ax.yaxis.set_major_locator(
-        ticker.MultipleLocator(major_step)
+        ticker.MultipleLocator(step)
     )
 
     ax.yaxis.set_minor_locator(
@@ -303,7 +295,7 @@ plt.close(fig)
 
 
 # 상세 데이터
-with st.expander("📋 연령별 인구 표 보기"):
+with st.expander("📋 상세 데이터 및 다운로드"):
     st.dataframe(
         result,
         hide_index=True,
@@ -315,6 +307,6 @@ with st.expander("📋 연령별 인구 표 보기"):
         data=result.to_csv(
             index=False
         ).encode("utf-8-sig"),
-        file_name=f"{area}_{year}_{gender}.csv",
+        file_name=f"{area}_{year}_{gender}_인구.csv",
         mime="text/csv"
     )
