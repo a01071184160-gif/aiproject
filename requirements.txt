@@ -2,3 +2,4 @@ streamlit>=1.35,<2
 folium>=0.16,<1
 pandas
 plotly
+matplotlib>=3.8,<4
